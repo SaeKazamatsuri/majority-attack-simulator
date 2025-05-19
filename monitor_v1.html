@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8">
+  <title>51%攻撃 可視化ダッシュボード</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 20px;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-bottom: 30px;
+    }
+
+    th,
+    td {
+      border: 1px solid #ccc;
+      padding: 8px;
+      text-align: left;
+    }
+
+    th {
+      background: #f0f0f0;
+    }
+
+    .attack {
+      color: red;
+      font-weight: bold;
+    }
+
+    .tree {
+      list-style-type: none;
+      padding-left: 1em;
+    }
+
+    .tree li {
+      margin: 2px 0;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h2>ノードステータス</h2>
+  <table id="status-table">
+    <thead>
+      <tr>
+        <th>ノード</th>
+        <th>チェーン長</th>
+        <th>最終ブロック時間</th>
+        <th>攻撃検知</th>
+      </tr>
+    </thead>
+    <!-- ここが置き換わる -->
+    <tbody></tbody>
+  </table>
+
+  <h2>チェーンツリー表示</h2>
+  <!-- ここが置き換わる -->
+  <div id="chains-container"></div>
+
+  <script>
+    const nodeUrls = [
+      "http://100.69.208.89:8000",
+      "http://100.76.231.73:8000",
+      "http://100.92.167.99:8000",
+      "http://100.75.238.65:8000"
+    ];
+
+    const prevHashes = {};
+
+    async function fetchStatus(url) {
+      const [statusRes, chainRes] = await Promise.all([
+        fetch(`${url}/status`),
+        fetch(`${url}/chain`)
+      ]);
+      if (!statusRes.ok || !chainRes.ok) throw new Error(`${url} 取得失敗`);
+      return {
+        url,
+        status: await statusRes.json(),
+        chain: await chainRes.json()
+      };
+    }
+
+    function buildTree(chain) {
+      const ul = document.createElement('ul');
+      ul.className = 'tree';
+      chain.forEach(blk => {
+        const li = document.createElement('li');
+        const text = `#${blk.index} ${new Date(blk.timestamp * 1000).toLocaleTimeString()} [${blk.data}]`;
+        li.textContent = text;
+        if (blk.data === 'attack') li.classList.add('attack');
+        ul.appendChild(li);
+      });
+      return ul;
+    }
+
+    async function update() {
+      // 1) 新しい tbody を作る
+      const newTbody = document.createElement('tbody');
+      // 2) 新しい chains-container を作る
+      const newChains = document.createElement('div');
+      newChains.id = 'chains-container';
+
+      // データ取得
+      const results = await Promise.all(
+        nodeUrls.map(u => fetchStatus(u).catch(_ => null))
+      );
+
+      results.forEach(res => {
+        if (!res) return;
+        const { url, status, chain } = res;
+        const last = status.last_block;
+        const prev = prevHashes[url];
+        const isAttack = (last.data === 'attack')
+          || (prev && prev !== last.hash && last.data === 'attack');
+
+        // テーブル行作成
+        const tr = document.createElement('tr');
+        if (isAttack) tr.classList.add('attack');
+        tr.innerHTML = `
+        <td>${url}</td>
+        <td>${status.chain_length}</td>
+        <td>${new Date(last.timestamp * 1000).toLocaleString()}</td>
+        <td>${isAttack ? '⚠️ 改ざん検知' : ''}</td>
+      `;
+        newTbody.appendChild(tr);
+
+        // ツリー領域作成
+        const section = document.createElement('section');
+        section.innerHTML = `<h3>${url} のチェーン</h3>`;
+        section.appendChild(buildTree(chain));
+        newChains.appendChild(section);
+
+        // ハッシュ記録更新
+        prevHashes[url] = last.hash;
+      });
+
+      // DOM置き換え（アトミックに）
+      const oldTbody = document.querySelector('#status-table tbody');
+      oldTbody.parentNode.replaceChild(newTbody, oldTbody);
+
+      const oldChains = document.getElementById('chains-container');
+      oldChains.parentNode.replaceChild(newChains, oldChains);
+    }
+
+    // 初回＆2秒間隔で更新
+    update();
+    setInterval(update, 2000);
+  </script>
+
+</body>
+
+</html>

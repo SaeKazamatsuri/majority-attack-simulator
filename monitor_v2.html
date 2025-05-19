@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>51% Attack Monitor with Blockchain Tree</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            background: #f9f9f9;
+            padding: 20px;
+        }
+
+        .node {
+            margin-bottom: 30px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            background: #fff;
+        }
+
+        .block {
+            display: inline-block;
+            padding: 5px 10px;
+            margin: 2px;
+            border: 1px solid #999;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .normal {
+            background: #cfc;
+        }
+
+        .attack {
+            background: #f99;
+        }
+
+        .danger {
+            color: red;
+            font-weight: bold;
+        }
+
+        #tree-container {
+            margin-top: 30px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            background: #fff;
+            position: relative;
+        }
+
+        #blockchain-tree {
+            width: 100%;
+            height: 500px;
+            border: 1px solid #ddd;
+            margin-top: 10px;
+            cursor: grab;
+        }
+
+        #blockchain-tree:active {
+            cursor: grabbing;
+        }
+
+        .fork-point {
+            border: 2px solid red;
+            box-shadow: 0 0 5px red;
+        }
+
+        .selected {
+            border: 2px solid blue;
+        }
+
+        .legend {
+            margin: 10px 0;
+            padding: 10px;
+            background: #eee;
+        }
+
+        .legend-item {
+            display: inline-block;
+            margin-right: 15px;
+        }
+
+        .controls {
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .zoom-controls {
+            margin-left: 20px;
+        }
+
+        .zoom-controls button {
+            padding: 5px 10px;
+            margin: 0 5px;
+        }
+
+        .tree-info {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: rgba(255, 255, 255, 0.8);
+            padding: 5px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            font-size: 12px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>51% Attack モニタリング (ツリー表示)</h1>
+
+    <div class="legend">
+        <div class="legend-item"><span class="block normal">□</span> 通常ブロック</div>
+        <div class="legend-item"><span class="block attack">□</span> 攻撃ブロック</div>
+        <div class="legend-item"><span style="color: red;">→</span> 分岐ポイント</div>
+        <div class="legend-item"><span style="color: blue;">→</span> 選択中のノードのチェーン</div>
+    </div>
+
+    <div id="nodes"></div>
+
+    <div id="tree-container">
+        <h2>ブロックチェーンツリー</h2>
+        <div class="controls">
+            <select id="node-selector">
+                <option value="">全ノードの統合ツリー</option>
+            </select>
+            <button onclick="updateTree()">更新</button>
+
+            <div class="zoom-controls">
+                <button onclick="zoomIn()">拡大 (+)</button>
+                <button onclick="resetView()">リセット</button>
+                <button onclick="zoomOut()">縮小 (-)</button>
+                <button onclick="autoFit()">全体表示</button>
+            </div>
+        </div>
+        <div class="tree-info">
+            <span id="blocks-count">ブロック数: 0</span>
+        </div>
+        <canvas id="blockchain-tree"></canvas>
+    </div>
+
+    <script>
+        const nodes = [
+            { name: "通常マシン①", url: "http://100.69.208.89:8000" },
+            { name: "通常マシン②", url: "http://100.76.231.73:8000" },
+            { name: "通常マシン③", url: "http://100.92.167.99:8000" },
+            { name: "攻撃マシン", url: "http://100.75.238.65:8000" }
+        ];
+
+        const previousStates = {};
+        let allBlocks = {};
+        let selectedNodeUrl = "";
+
+        // ビュー管理用の変数
+        let scale = 1;
+        let offsetX = 0;
+        let offsetY = 0;
+        let isDragging = false;
+        let lastX = 0;
+        let lastY = 0;
+
+        // ノード選択メニューの初期化
+        function initNodeSelector() {
+            const selector = document.getElementById("node-selector");
+            nodes.forEach(node => {
+                const option = document.createElement("option");
+                option.value = node.url;
+                option.textContent = node.name;
+                selector.appendChild(option);
+            });
+        }
+
+        initNodeSelector();
+
+        async function fetchChain(node) {
+            try {
+                const res = await fetch(`${node.url}/chain`);
+                const chain = await res.json();
+                return chain;
+            } catch (e) {
+                console.error(`Error fetching from ${node.name}:`, e);
+                return null;
+            }
+        }
+
+        function renderChain(node, chain) {
+            const container = document.getElementById("nodes");
+            let section = document.getElementById(node.url);
+
+            const hasAttack = chain.some(b => b.data === "attack");
+
+            if (!section) {
+                section = document.createElement("div");
+                section.className = "node";
+                section.id = node.url;
+                container.appendChild(section);
+            }
+
+            section.innerHTML = `<h2>${node.name} (${node.url})</h2>`;
+
+            const blockContainer = document.createElement("div");
+
+            chain.forEach(block => {
+                const div = document.createElement("div");
+                div.className = "block " + (block.data === "attack" ? "attack" : "normal");
+                div.textContent = `[${block.index}] ${block.data}`;
+                div.setAttribute("data-hash", block.hash);
+                div.setAttribute("data-prev", block.previous_hash);
+                div.onclick = () => highlightBlock(block.hash);
+                blockContainer.appendChild(div);
+
+                // グローバルブロックリストに追加
+                if (!allBlocks[block.hash]) {
+                    allBlocks[block.hash] = {
+                        hash: block.hash,
+                        previous_hash: block.previous_hash,
+                        index: block.index,
+                        data: block.data,
+                        nodes: []
+                    };
+                }
+
+                // このノードがこのブロックを持っていることを記録
+                if (!allBlocks[block.hash].nodes.includes(node.url)) {
+                    allBlocks[block.hash].nodes.push(node.url);
+                }
+            });
+
+            section.appendChild(blockContainer);
+
+            // 攻撃チェーンに置き換わったか判定
+            const prev = previousStates[node.url];
+            if (prev && !prev.includes("attack") && hasAttack) {
+                const alert = document.createElement("div");
+                alert.className = "danger";
+                alert.textContent = "⚠️ 攻撃チェーンに置き換わりました！";
+                section.appendChild(alert);
+            }
+
+            previousStates[node.url] = chain.map(b => b.data);
+        }
+
+        function highlightBlock(hash) {
+            // 選択されたブロックをハイライト
+            const blocks = document.querySelectorAll(".block");
+            blocks.forEach(block => {
+                block.classList.remove("selected");
+                if (block.getAttribute("data-hash") === hash) {
+                    block.classList.add("selected");
+                }
+            });
+
+            // ツリー表示も更新
+            updateTree(hash);
+        }
+
+        // ブロックチェーンツリーの描画
+        function drawBlockchainTree(canvas, blocks, selectedHash = null) {
+            const ctx = canvas.getContext("2d");
+            const width = canvas.width;
+            const height = canvas.height;
+
+            // キャンバスをクリア
+            ctx.clearRect(0, 0, width, height);
+
+            // ブロックのサイズと間隔を設定
+            const blockSize = 25 * scale;
+            const horizontalSpacing = 60 * scale;
+            const verticalSpacing = 40 * scale;
+
+            // ジェネシスブロックを探す
+            const genesisBlock = Object.values(blocks).find(block => block.previous_hash === "0");
+            if (!genesisBlock) return;
+
+            // ブロックの位置を計算
+            const positions = {};
+            const branches = {};
+            let maxDepth = 0;
+            let maxBranch = 0;
+
+            // 深さ優先探索でブロックの位置を計算
+            function calculatePositions(hash, depth = 0, branch = 0) {
+                if (!hash || !blocks[hash]) return;
+
+                const block = blocks[hash];
+
+                // 最大深さを更新
+                maxDepth = Math.max(maxDepth, depth);
+                maxBranch = Math.max(maxBranch, branch);
+
+                // この深さでのブロック数をカウント
+                if (!branches[depth]) branches[depth] = {};
+                if (!branches[depth][branch]) branches[depth][branch] = 0;
+
+                // 位置を記録（オフセットと拡大縮小を適用）
+                positions[hash] = {
+                    x: depth * horizontalSpacing + 50 * scale + offsetX,
+                    y: branch * verticalSpacing + 50 * scale + offsetY,
+                    branch: branch
+                };
+
+                // 次のブロックを探す
+                const nextBlocks = Object.values(blocks).filter(b => b.previous_hash === hash);
+
+                // 分岐がある場合
+                if (nextBlocks.length > 1) {
+                    // 分岐ごとに別のブランチに割り当てる
+                    nextBlocks.forEach((nextBlock, i) => {
+                        const newBranch = branch + i;
+                        calculatePositions(nextBlock.hash, depth + 1, newBranch);
+                    });
+                }
+                // 分岐がない場合
+                else if (nextBlocks.length === 1) {
+                    calculatePositions(nextBlocks[0].hash, depth + 1, branch);
+                }
+            }
+
+            // ジェネシスブロックから位置を計算
+            calculatePositions(genesisBlock.hash);
+
+            // ブロック間の接続線を描画
+            ctx.strokeStyle = "#999";
+            ctx.lineWidth = 1 * scale;
+
+            Object.values(blocks).forEach(block => {
+                if (block.previous_hash !== "0" && positions[block.hash] && positions[block.previous_hash]) {
+                    const from = positions[block.previous_hash];
+                    const to = positions[block.hash];
+
+                    ctx.beginPath();
+                    ctx.moveTo(from.x + blockSize / 2, from.y + blockSize / 2);
+                    ctx.lineTo(to.x + blockSize / 2, to.y + blockSize / 2);
+                    ctx.stroke();
+                }
+            });
+
+            // 選択したノードのチェーンを強調表示
+            if (selectedNodeUrl) {
+                const nodeBlocks = Object.values(blocks).filter(block =>
+                    block.nodes.includes(selectedNodeUrl)
+                );
+
+                // チェーンのパスを強調
+                ctx.strokeStyle = "blue";
+                ctx.lineWidth = 2 * scale;
+
+                for (let i = 0; i < nodeBlocks.length - 1; i++) {
+                    const block = nodeBlocks[i];
+                    const nextBlock = nodeBlocks.find(b => b.previous_hash === block.hash);
+
+                    if (nextBlock && positions[block.hash] && positions[nextBlock.hash]) {
+                        const from = positions[block.hash];
+                        const to = positions[nextBlock.hash];
+
+                        ctx.beginPath();
+                        ctx.moveTo(from.x + blockSize / 2, from.y + blockSize / 2);
+                        ctx.lineTo(to.x + blockSize / 2, to.y + blockSize / 2);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // 分岐ポイントを特定
+            const forkPoints = new Set();
+            Object.values(blocks).forEach(block => {
+                const childBlocks = Object.values(blocks).filter(b => b.previous_hash === block.hash);
+                if (childBlocks.length > 1) {
+                    forkPoints.add(block.hash);
+                }
+            });
+
+            // ブロックを描画
+            Object.values(blocks).forEach(block => {
+                if (!positions[block.hash]) return;
+
+                const pos = positions[block.hash];
+
+                // 画面外のブロックはスキップ（最適化）
+                if (pos.x < -blockSize || pos.y < -blockSize ||
+                    pos.x > width + blockSize || pos.y > height + blockSize) {
+                    return;
+                }
+
+                // ブロックの色を設定
+                if (block.data === "attack") {
+                    ctx.fillStyle = "#f99";
+                } else {
+                    ctx.fillStyle = "#cfc";
+                }
+
+                // ブロックを描画
+                ctx.fillRect(pos.x, pos.y, blockSize, blockSize);
+
+                // 分岐ポイントを強調
+                if (forkPoints.has(block.hash)) {
+                    ctx.strokeStyle = "red";
+                    ctx.lineWidth = 2 * scale;
+                    ctx.strokeRect(pos.x - 1, pos.y - 1, blockSize + 2, blockSize + 2);
+                }
+
+                // 選択されたブロックを強調
+                if (selectedHash === block.hash) {
+                    ctx.strokeStyle = "blue";
+                    ctx.lineWidth = 2 * scale;
+                    ctx.strokeRect(pos.x - 1, pos.y - 1, blockSize + 2, blockSize + 2);
+                }
+
+                // ブロックのインデックスを表示（スケールに合わせてフォントサイズを調整）
+                ctx.fillStyle = "black";
+                ctx.font = `${10 * scale}px sans-serif`;
+                ctx.fillText(block.index, pos.x + 5 * scale, pos.y + blockSize / 2 + 4 * scale);
+            });
+
+            // 情報を更新
+            document.getElementById("blocks-count").textContent = `ブロック数: ${Object.keys(blocks).length} | 最大深さ: ${maxDepth} | 分岐数: ${maxBranch + 1}`;
+
+            // 凡例表示
+            ctx.fillStyle = "black";
+            ctx.font = "12px sans-serif";
+            ctx.fillText("縦軸: 分岐 / 横軸: ブロック高", 10, height - 20);
+            ctx.fillText("赤枠: 分岐ポイント / 青枠: 選択中", 10, height - 5);
+        }
+
+        // ズーム・パン操作のためのイベント設定
+        function setupCanvasEvents() {
+            const canvas = document.getElementById("blockchain-tree");
+
+            // ホイールでズーム
+            canvas.addEventListener("wheel", (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? -0.1 : 0.1;
+                const newScale = Math.max(0.1, Math.min(3, scale + delta));
+
+                // マウス位置を中心にズーム
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+
+                // ズーム中心点からの相対位置を保持するように調整
+                offsetX = mouseX - (mouseX - offsetX) * (newScale / scale);
+                offsetY = mouseY - (mouseY - offsetY) * (newScale / scale);
+
+                scale = newScale;
+                updateTree();
+            });
+
+            // ドラッグでパン
+            canvas.addEventListener("mousedown", (e) => {
+                isDragging = true;
+                lastX = e.clientX;
+                lastY = e.clientY;
+                canvas.style.cursor = "grabbing";
+            });
+
+            window.addEventListener("mousemove", (e) => {
+                if (!isDragging) return;
+
+                const dx = e.clientX - lastX;
+                const dy = e.clientY - lastY;
+
+                offsetX += dx;
+                offsetY += dy;
+
+                lastX = e.clientX;
+                lastY = e.clientY;
+
+                updateTree();
+            });
+
+            window.addEventListener("mouseup", () => {
+                isDragging = false;
+                canvas.style.cursor = "grab";
+            });
+        }
+
+        // ズーム・パン機能
+        function zoomIn() {
+            scale = Math.min(3, scale + 0.2);
+            updateTree();
+        }
+
+        function zoomOut() {
+            scale = Math.max(0.1, scale - 0.2);
+            updateTree();
+        }
+
+        function resetView() {
+            scale = 1;
+            offsetX = 0;
+            offsetY = 0;
+            updateTree();
+        }
+
+        // 自動フィット - 全体が見えるようにスケールと位置を調整
+        function autoFit() {
+            const canvas = document.getElementById("blockchain-tree");
+            const blocks = Object.values(allBlocks);
+
+            if (blocks.length === 0) return;
+
+            const genesisBlock = blocks.find(block => block.previous_hash === "0");
+            if (!genesisBlock) return;
+
+            // ツリーの深さと幅を計算
+            let maxDepth = 0;
+            let maxBranch = 0;
+
+            function calculateDimensions(hash, depth = 0, branch = 0) {
+                if (!hash || !allBlocks[hash]) return;
+
+                maxDepth = Math.max(maxDepth, depth);
+                maxBranch = Math.max(maxBranch, branch);
+
+                const nextBlocks = blocks.filter(b => b.previous_hash === hash);
+
+                if (nextBlocks.length > 1) {
+                    nextBlocks.forEach((nextBlock, i) => {
+                        calculateDimensions(nextBlock.hash, depth + 1, branch + i);
+                    });
+                } else if (nextBlocks.length === 1) {
+                    calculateDimensions(nextBlocks[0].hash, depth + 1, branch);
+                }
+            }
+
+            calculateDimensions(genesisBlock.hash);
+
+            // スケールを計算
+            const horizontalSpace = 60; // ブロック間の水平間隔
+            const verticalSpace = 40;   // ブロック間の垂直間隔
+            const horizontalScale = (canvas.width - 100) / ((maxDepth + 1) * horizontalSpace);
+            const verticalScale = (canvas.height - 100) / ((maxBranch + 1) * verticalSpace);
+
+            // 小さい方のスケールを採用
+            scale = Math.min(horizontalScale, verticalScale, 1); // 最大でも1倍に制限
+
+            // 中央に配置
+            offsetX = 50;
+            offsetY = 50;
+
+            updateTree();
+        }
+
+        function updateTree(selectedHash = null) {
+            const canvas = document.getElementById("blockchain-tree");
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+
+            // フィルタリング
+            selectedNodeUrl = document.getElementById("node-selector").value;
+            let filteredBlocks = { ...allBlocks };
+
+            if (selectedNodeUrl) {
+                // 特定のノードのブロックだけをフィルタリング
+                filteredBlocks = Object.fromEntries(
+                    Object.entries(allBlocks).filter(([hash, block]) =>
+                        block.nodes.includes(selectedNodeUrl)
+                    )
+                );
+            }
+
+            drawBlockchainTree(canvas, filteredBlocks, selectedHash);
+        }
+
+        async function updateAll() {
+            for (const node of nodes) {
+                const chain = await fetchChain(node);
+                if (chain) {
+                    renderChain(node, chain);
+                }
+            }
+
+            // ツリー表示も更新
+            updateTree();
+        }
+
+        // 初期化
+        setupCanvasEvents();
+        setInterval(updateAll, 1000);
+        updateAll(); // 初回実行
+    </script>
+</body>
+
+</html>
