@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
