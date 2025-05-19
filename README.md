@@ -1,4 +1,4 @@
-# FastAPI Blockchain Node
+# majority-attack-simulator
 
 このリポジトリは、FastAPIを用いて構築されたシンプルなProof-of-Work(PoW)方式のブロックチェーンノードの実装です。複数ノードが相互に通信しながらブロックチェーンを同期します。開発や教育目的での使用を想定しています。
 
